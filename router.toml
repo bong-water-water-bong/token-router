@@ -7,15 +7,15 @@ default_strategy = "content"
 
   [backends.npu]
   type = "openai"
-  base_url = "http://127.0.0.1:52628/v1"
-  models = ["qwen3-0.6b-FLM"]
+  base_url = "http://127.0.0.1:52628"
+  models = ["qwen3:0.6b"]
   speed_tok_s = 291
   cost_per_token = 0.1
 
   [backends.gpu]
   type = "openai"
-  base_url = "http://127.0.0.1:13305/v1"
-  models = ["bonsai-1.7b", "bitnet"]
+  base_url = "http://127.0.0.1:13305"
+  models = ["Bonsai-1.7B-gguf"]
   speed_tok_s = 113
   cost_per_token = 1.0
 

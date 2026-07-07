@@ -39,10 +39,10 @@ async fn main() -> anyhow::Result<()> {
         cfg
     };
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
+    // Initialize tracing (non-fatal if already set)
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(&config.server.log_level)
-        .init();
+        .try_init();
 
     // Run server
     handlers::run_server(config).await

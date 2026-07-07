@@ -772,10 +772,10 @@ pub fn build_app_from_components(pool: BackendPool, strategy: Box<dyn RouterStra
 /// Run the token router server from a parsed Config.
 pub async fn run_server(config: Config) -> anyhow::Result<()> {
 
-    // Initialize tracing
-    tracing_subscriber::fmt()
+    // Initialize tracing (non-fatal if already set)
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(&config.server.log_level)
-        .init();
+        .try_init();
 
     info!("Token Router v{}", env!("CARGO_PKG_VERSION"));
     info!("Strategy: {}", config.server.default_strategy);

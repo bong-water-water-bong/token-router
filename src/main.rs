@@ -8,6 +8,7 @@
 //!   token-router  # uses default config (passthrough to localhost:13305)
 
 mod backend;
+mod cascade;
 mod config;
 mod context;
 mod strategy;
@@ -210,7 +211,64 @@ async fn chat_completion(
     };
     info!(%route_label, "Routing chat completion");
 
-    // Get routing decision
+    // ── Cascade strategy (streaming) — the novel path ────────────────
+    // Token-level confidence routing: start NPU, switch to GPU on low confidence.
+    if state.strategy.name() == "cascade" && stream {
+        // Extract cascade config (backend IDs and threshold)
+        let cascade_cfg = match state.config.strategies.get("cascade") {
+            Some(config::StrategyConfig::Cascade {
+                small_backend,
+                large_backend,
+                confidence_threshold,
+                ..
+            }) => (small_backend.clone(), large_backend.clone(), *confidence_threshold),
+            _ => {
+                // Fallback: use default backends
+                let ids = state.pool.backend_ids();
+                let npu = ids.iter().find(|id| id.contains("npu")).cloned()
+                    .unwrap_or_else(|| ids.first().cloned().unwrap_or_default());
+                let gpu = ids.iter().find(|id| id.contains("gpu")).cloned()
+                    .unwrap_or_else(|| ids.last().cloned().unwrap_or_default());
+                (npu, gpu, -2.5)
+            }
+        };
+
+        let (npu_id, gpu_id, threshold) = cascade_cfg;
+
+        let npu_client = match state.pool.client(&npu_id) {
+            Some(c) => c,
+            None => return proxy_single(state, parsed, &gpu_id, stream).await,
+        };
+        let gpu_client = match state.pool.client(&gpu_id) {
+            Some(c) => c,
+            None => return proxy_single(state, parsed, &npu_id, stream).await,
+        };
+
+        info!(npu = %npu_id, gpu = %gpu_id, threshold = %threshold, "Cascade streaming");
+
+        let stream_body = cascade::cascade_stream(npu_client, gpu_client, parsed, threshold);
+        let mut resp = Response::new(Body::from_stream(stream_body));
+        resp.headers_mut().insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
+        resp.headers_mut().insert(
+            "cache-control",
+            HeaderValue::from_static("no-cache"),
+        );
+        resp.headers_mut().insert(
+            "x-route-backend",
+            HeaderValue::from_static("cascade"),
+        );
+        return resp;
+    }
+
+    // ── Cascade strategy (non-streaming) ─────────────────────────────
+    if state.strategy.name() == "cascade" && !stream {
+        return cascade_nonstreaming(state, parsed).await;
+    }
+
+    // ── Standard routing: single backend ─────────────────────────────
     let decision = state.strategy.route(&ctx, &state.pool).await;
 
     let (backend, backend_label) = match &decision {
@@ -235,6 +293,125 @@ async fn chat_completion(
 
     info!(backend = %backend, strategy = %state.strategy.name(), "Routed request");
     proxy_request(client, parsed, stream, &backend_label).await
+}
+
+/// Quick proxy to a single backend by ID (used as fallback).
+async fn proxy_single(
+    state: Arc<AppState>,
+    body: serde_json::Value,
+    backend_id: &str,
+    stream: bool,
+) -> Response {
+    let client = match state.pool.client(backend_id) {
+        Some(c) => c,
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"error": {"message": format!("Backend '{}' not available", backend_id)}}).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+    proxy_request(client, body, stream, backend_id).await
+}
+
+/// Cascade routing for non-streaming requests.
+/// Sends to NPU with logprobs, checks per-token confidence, re-routes to GPU if needed.
+async fn cascade_nonstreaming(state: Arc<AppState>, body: serde_json::Value) -> Response {
+    let cascade_cfg = match state.config.strategies.get("cascade") {
+        Some(config::StrategyConfig::Cascade {
+            small_backend,
+            large_backend,
+            confidence_threshold,
+            ..
+        }) => (small_backend.clone(), large_backend.clone(), *confidence_threshold),
+        _ => return proxy_single(state, body, "gpu", false).await,
+    };
+
+    let (npu_id, gpu_id, threshold) = cascade_cfg;
+
+    // Try NPU first with logprobs
+    let npu_client = match state.pool.client(&npu_id) {
+        Some(c) => c,
+        None => return proxy_single(state, body, &gpu_id, false).await,
+    };
+
+    let mut npu_body = body.clone();
+    npu_body["logprobs"] = serde_json::Value::Bool(true);
+    npu_body["top_logprobs"] = serde_json::Value::Number(serde_json::Number::from(1));
+    npu_body["stream"] = serde_json::Value::Bool(false);
+
+    match npu_client.chat_completion(npu_body).await {
+        Ok(npu_result) => {
+            // Check per-token log-probs
+            let low_conf = check_logprobs(&npu_result, threshold);
+
+            if low_conf {
+                info!("Cascade (non-streaming): low confidence on NPU, rerouting to GPU");
+                // Re-send to GPU
+                let gpu_client = match state.pool.client(&gpu_id) {
+                    Some(c) => c,
+                    None => {
+                        return Response::builder()
+                            .header("content-type", "application/json")
+                            .body(Body::from(serde_json::to_string(&npu_result).unwrap()))
+                            .unwrap();
+                    }
+                };
+
+                match gpu_client.chat_completion(body).await {
+                    Ok(gpu_result) => {
+                        Response::builder()
+                            .header("content-type", "application/json")
+                            .header("x-route-backend", &gpu_id)
+                            .body(Body::from(serde_json::to_string(&gpu_result).unwrap()))
+                            .unwrap()
+                    }
+                    Err(e) => {
+                        warn!("GPU fallback failed: {}. Returning NPU result.", e);
+                        Response::builder()
+                            .header("content-type", "application/json")
+                            .header("x-route-backend", &npu_id)
+                            .body(Body::from(serde_json::to_string(&npu_result).unwrap()))
+                            .unwrap()
+                    }
+                }
+            } else {
+                info!("Cascade (non-streaming): NPU confidence OK");
+                Response::builder()
+                    .header("content-type", "application/json")
+                    .header("x-route-backend", &npu_id)
+                    .body(Body::from(serde_json::to_string(&npu_result).unwrap()))
+                    .unwrap()
+            }
+        }
+        Err(e) => {
+            warn!("NPU request failed in cascade: {}. Falling back to GPU.", e);
+            proxy_single(state, body, &gpu_id, false).await
+        }
+    }
+}
+
+/// Check if any token in the response has log-prob below threshold.
+fn check_logprobs(response: &serde_json::Value, threshold: f64) -> bool {
+    if let Some(choices) = response["choices"].as_array() {
+        for choice in choices {
+            if let Some(logprobs) = choice.get("logprobs") {
+                if let Some(content) = logprobs["content"].as_array() {
+                    for token_info in content {
+                        if let Some(lp) = token_info["logprob"].as_f64() {
+                            if lp < threshold {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 /// Proxy a request to a backend, handling both streaming and non-streaming.

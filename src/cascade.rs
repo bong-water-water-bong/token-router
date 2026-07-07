@@ -64,6 +64,8 @@ async fn run_cascade(
     let mut npu_stream = npu_resp.bytes_stream();
     let mut sse_buf = String::new();
     let mut accumulated: Vec<String> = Vec::new();
+    let mut recent_logprobs: Vec<f64> = Vec::new();  // sliding window for confidence
+    const CONFIDENCE_WINDOW: usize = 3;
 
     while let Some(chunk_result) = npu_stream.next().await {
         let chunk = chunk_result.map_err(|e| format!("NPU stream error: {}", e))?;
@@ -86,19 +88,28 @@ async fn run_cascade(
                 let delta = extract_delta(&data_str);
                 let logprob = extract_log_prob(&data_str);
 
-                // Track accumulated tokens
+                // Track accumulated tokens and sliding window logprobs
                 if let Some(tok) = &delta {
                     accumulated.push(tok.clone());
                 }
-
-                // Check confidence threshold (only before we switch)
                 if let Some(lp) = logprob {
-                    if (lp as f64) < threshold && accumulated.len() >= 2 {
+                    recent_logprobs.push(lp as f64);
+                    if recent_logprobs.len() > CONFIDENCE_WINDOW {
+                        recent_logprobs.remove(0);
+                    }
+                }
+
+                // Check confidence using sliding window average (reduces noise)
+                // Only trigger after we have enough tokens and logprobs
+                if recent_logprobs.len() >= CONFIDENCE_WINDOW && accumulated.len() >= CONFIDENCE_WINDOW {
+                    let avg_logprob: f64 = recent_logprobs.iter().sum::<f64>() / recent_logprobs.len() as f64;
+                    if avg_logprob < threshold {
                         info!(
-                            "Cascade: switch to GPU at token {} (logprob={:.3} < {})",
+                            "Cascade: switch to GPU at token {} (avg_logprob={:.3} < {:.1}, window={})",
                             accumulated.len(),
-                            lp,
-                            threshold
+                            avg_logprob,
+                            threshold,
+                            CONFIDENCE_WINDOW
                         );
 
                         // Handoff to GPU with accumulated context

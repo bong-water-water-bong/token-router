@@ -33,6 +33,8 @@ pub struct BackendState {
     pub last_checked: Instant,
     #[allow(dead_code)]
     pub latency_p50_ms: f64,
+    pub latency_ema_ms: f64,
+    pub circuit_open: bool,
 }
 
 /// The backend pool manages connections to all configured backends.
@@ -50,13 +52,16 @@ impl BackendPool {
         };
 
         for (id, cfg) in configs {
+            let initial_latency = 1000.0 / cfg.speed_tok_s.unwrap_or(100.0);
             let client = Arc::new(BackendClient::new(&cfg.base_url, cfg.api_key.as_deref()));
             pool.clients.insert(id.clone(), client);
             pool.backends.insert(id.clone(), BackendState {
                 id: id.clone(),
                 healthy: true,
                 last_checked: Instant::now(),
-                latency_p50_ms: 1000.0 / cfg.speed_tok_s.unwrap_or(100.0),
+                latency_p50_ms: initial_latency,
+                latency_ema_ms: initial_latency,
+                circuit_open: false,
                 config: cfg,
             });
             info!(backend = %id, "Registered backend");
@@ -120,5 +125,17 @@ impl BackendPool {
             handles.push(self.health_check(id));
         }
         futures::future::join_all(handles).await;
+    }
+
+    /// Refresh latency EMA and circuit breaker state from live client metrics.
+    pub async fn refresh_metrics(&self) {
+        for mut entry in self.backends.iter_mut() {
+            let id = entry.key().clone();
+            if let Some(client) = self.clients.get(&id) {
+                let state = entry.value_mut();
+                state.latency_ema_ms = client.latency.current().await;
+                state.circuit_open = !client.is_available();
+            }
+        }
     }
 }

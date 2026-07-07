@@ -165,6 +165,7 @@ pub async fn list_models(State(state): State<Arc<AppState>>) -> Response {
 
 /// GET /v1/router — status endpoint showing routing state.
 pub async fn router_status(State(state): State<Arc<AppState>>) -> Response {
+    state.pool.refresh_metrics().await;
     let backends: Vec<serde_json::Value> = state.pool.all_states()
         .into_iter()
         .map(|b| serde_json::json!({
@@ -172,6 +173,8 @@ pub async fn router_status(State(state): State<Arc<AppState>>) -> Response {
             "healthy": b.healthy,
             "models": b.config.models,
             "type": b.config.backend_type,
+            "latency_ema_ms": format!("{:.1}", b.latency_ema_ms),
+            "circuit_open": b.circuit_open,
         }))
         .collect();
 
@@ -188,6 +191,9 @@ pub async fn router_status(State(state): State<Arc<AppState>>) -> Response {
 
 /// GET /v1/router/metrics — runtime metrics.
 pub async fn router_metrics(State(state): State<Arc<AppState>>) -> Response {
+    // Refresh latency metrics from live clients
+    state.pool.refresh_metrics().await;
+
     let uptime = state.metrics.start_time.elapsed().as_secs();
     let total = state.metrics.requests_total.load(std::sync::atomic::Ordering::Relaxed);
     let switches = state.metrics.cascade_switches.load(std::sync::atomic::Ordering::Relaxed);
@@ -198,6 +204,8 @@ pub async fn router_metrics(State(state): State<Arc<AppState>>) -> Response {
             "id": b.id,
             "healthy": b.healthy,
             "type": b.config.backend_type,
+            "latency_ema_ms": format!("{:.1}", b.latency_ema_ms),
+            "circuit_open": b.circuit_open,
         }))
         .collect();
 

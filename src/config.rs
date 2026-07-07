@@ -53,6 +53,9 @@ pub struct BackendConfig {
     #[serde(default)]
     pub speed_tok_s: Option<f64>,
 
+    #[serde(default)]
+    pub max_concurrent: Option<usize>,
+
     #[serde(default = "default_cost")]
     pub cost_per_token: f64,
 }

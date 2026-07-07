@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
                 models: vec!["*".to_string()],
                 speed_tok_s: Some(100.0),
                 cost_per_token: 1.0,
+                max_concurrent: Some(4),
             },
         );
         cfg

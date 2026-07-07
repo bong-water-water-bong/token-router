@@ -1,7 +1,7 @@
 [server]
 listen = "127.0.0.1:13306"
 log_level = "info"
-default_strategy = "content"
+default_strategy = "cascade"
 
 [backends]
 

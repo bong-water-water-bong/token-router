@@ -8,6 +8,7 @@ use crate::config::BackendConfig;
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
 /// Unique identifier for a backend instance.
@@ -25,16 +26,33 @@ pub enum Capability {
 }
 
 /// Runtime state for a single backend.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct BackendState {
     pub id: BackendId,
     pub config: BackendConfig,
     pub healthy: bool,
     pub last_checked: Instant,
-    #[allow(dead_code)]
-    pub latency_p50_ms: f64,
     pub latency_ema_ms: f64,
     pub circuit_open: bool,
+    pub active_requests: usize,
+    pub max_concurrent: usize,
+    semaphore: Arc<Semaphore>,
+}
+
+impl Clone for BackendState {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            config: self.config.clone(),
+            healthy: self.healthy,
+            last_checked: self.last_checked,
+            latency_ema_ms: self.latency_ema_ms,
+            circuit_open: self.circuit_open,
+            active_requests: self.active_requests,
+            max_concurrent: self.max_concurrent,
+            semaphore: self.semaphore.clone(),
+        }
+    }
 }
 
 /// The backend pool manages connections to all configured backends.
@@ -53,15 +71,18 @@ impl BackendPool {
 
         for (id, cfg) in configs {
             let initial_latency = 1000.0 / cfg.speed_tok_s.unwrap_or(100.0);
+            let max_concurrent = cfg.max_concurrent.unwrap_or(4);
             let client = Arc::new(BackendClient::new(&cfg.base_url, cfg.api_key.as_deref()));
             pool.clients.insert(id.clone(), client);
             pool.backends.insert(id.clone(), BackendState {
                 id: id.clone(),
                 healthy: true,
                 last_checked: Instant::now(),
-                latency_p50_ms: initial_latency,
                 latency_ema_ms: initial_latency,
                 circuit_open: false,
+                active_requests: 0,
+                max_concurrent,
+                semaphore: Arc::new(Semaphore::new(max_concurrent)),
                 config: cfg,
             });
             info!(backend = %id, "Registered backend");
@@ -89,6 +110,45 @@ impl BackendPool {
     /// List all backend states.
     pub fn all_states(&self) -> Vec<BackendState> {
         self.backends.iter().map(|e| e.value().clone()).collect()
+    }
+
+    /// Acquire a concurrency permit for a backend. Returns None if at capacity.
+    pub async fn acquire_permit(&self, id: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if let Some(state) = self.backends.get(id) {
+            let permit = state.semaphore.clone().acquire_owned().await.ok()?;
+            // Increment active count (best-effort, for metrics)
+            if let Some(mut s) = self.backends.get_mut(id) {
+                s.active_requests += 1;
+            }
+            return Some(permit);
+        }
+        None
+    }
+
+    /// Try to acquire a concurrency permit without waiting.
+    pub fn try_acquire_permit(&self, id: &str) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if let Some(state) = self.backends.get(id) {
+            match state.semaphore.clone().try_acquire_owned() {
+                Ok(permit) => {
+                    if let Some(mut s) = self.backends.get_mut(id) {
+                        s.active_requests += 1;
+                    }
+                    return Some(permit);
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    /// Release a concurrency permit (called on drop, but explicit for metrics).
+    pub fn release_permit(&self, id: &str) {
+        if let Some(mut s) = self.backends.get_mut(id) {
+            if s.active_requests > 0 {
+                s.active_requests -= 1;
+            }
+        }
+        // Semaphore permit is released on drop
     }
 
     /// Health-check a specific backend.

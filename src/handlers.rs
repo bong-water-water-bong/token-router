@@ -37,7 +37,7 @@ pub struct Args {
 
 /// Shared application state.
 pub struct AppState {
-    pool: BackendPool,
+    pool: Arc<BackendPool>,
     strategy: Box<dyn RouterStrategy>,
     #[allow(dead_code)]
     config: Config,
@@ -171,10 +171,12 @@ pub async fn router_status(State(state): State<Arc<AppState>>) -> Response {
         .map(|b| serde_json::json!({
             "id": b.id,
             "healthy": b.healthy,
-            "models": b.config.models,
             "type": b.config.backend_type,
+            "models": b.config.models,
             "latency_ema_ms": format!("{:.1}", b.latency_ema_ms),
             "circuit_open": b.circuit_open,
+            "active_requests": b.active_requests,
+            "max_concurrent": b.max_concurrent,
         }))
         .collect();
 
@@ -206,6 +208,8 @@ pub async fn router_metrics(State(state): State<Arc<AppState>>) -> Response {
             "type": b.config.backend_type,
             "latency_ema_ms": format!("{:.1}", b.latency_ema_ms),
             "circuit_open": b.circuit_open,
+            "active_requests": b.active_requests,
+            "max_concurrent": b.max_concurrent,
         }))
         .collect();
 
@@ -769,7 +773,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
 /// Convenience: build app from components (for tests).
 pub fn build_app_from_components(pool: BackendPool, strategy: Box<dyn RouterStrategy>, config: Config) -> Router {
     let state = Arc::new(AppState {
-        pool,
+        pool: Arc::new(pool),
         strategy,
         config,
         metrics: AppMetrics::new(),
@@ -804,9 +808,11 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
     // Build strategy
     let strategy = build_strategy(&config);
 
+    let pool = Arc::new(pool);
+
     // Shared state with metrics
     let state = Arc::new(AppState {
-        pool,
+        pool: pool.clone(),
         strategy,
         config: config.clone(),
         metrics: AppMetrics::new(),
@@ -817,6 +823,15 @@ pub async fn run_server(config: Config) -> anyhow::Result<()> {
     // Start server with graceful shutdown
     let listener = TcpListener::bind(&config.server.listen).await?;
     info!("Token Router listening on {}", config.server.listen);
+
+    // Spawn background health check loop (every 30s)
+    let pool_for_health = pool.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            pool_for_health.health_check_all().await;
+        }
+    });
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())

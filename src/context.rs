@@ -49,6 +49,7 @@ pub struct Context {
 }
 
 impl Context {
+    #[allow(dead_code)]
     pub fn new(session_id: String, max_tokens: usize) -> Self {
         Self {
             session_id,

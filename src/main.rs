@@ -17,14 +17,14 @@ use axum::{
     Router,
     body::Body,
     extract::State,
-    http::{Method, StatusCode},
+    http::{HeaderValue, Method, StatusCode},
     response::Response,
     routing::{get, post},
 };
 use backend::{BackendClient, BackendPool};
 use clap::Parser;
 use config::Config;
-use context::Context as RouterContext;
+use context::{Context as RouterContext, Message as RouterMessage};
 use std::sync::Arc;
 use bytes::Bytes;
 use strategy::{CascadeStrategy, ContentRouterStrategy, PassthroughStrategy, SpecDecodeStrategy, RouterStrategy, RoutingDecision};
@@ -72,18 +72,14 @@ fn build_strategy(config: &Config) -> Box<dyn RouterStrategy> {
                 })
             }
             config::StrategyConfig::ContentRouter {
-                fallback_large_backend,
+                small_backend,
+                large_backend,
                 gpu_keywords,
                 max_small_tokens,
             } => {
-                let small = config.backends.keys()
-                    .find(|k| *k != fallback_large_backend)
-                    .cloned()
-                    .unwrap_or_else(|| "npu".to_string());
-
                 Box::new(ContentRouterStrategy {
-                    small_backend: small,
-                    large_backend: fallback_large_backend.clone(),
+                    small_backend: small_backend.clone(),
+                    large_backend: large_backend.clone(),
                     gpu_keywords: gpu_keywords.clone(),
                     max_small_tokens: *max_small_tokens,
                 })
@@ -192,59 +188,57 @@ async fn chat_completion(
     let max_tokens = parsed.get("max_tokens").and_then(|m| m.as_u64()).unwrap_or(512) as usize;
     let model_hint = parsed.get("model").and_then(|m| m.as_str()).map(String::from);
 
-    // Build routing context
-    let ctx = RouterContext::new(uuid::Uuid::new_v4().to_string(), max_tokens);
+    // Extract messages from request body
+    let messages = parse_openai_messages(&parsed);
+
+    // Build routing context with messages populated
     let ctx = RouterContext {
+        messages,
+        session_id: uuid::Uuid::new_v4().to_string(),
+        max_tokens,
         model_hint,
         stream,
-        ..ctx
+        generated: Vec::new(),
+        total_tokens: 0,
     };
+
+    // Log routing decision for observability
+    let route_label = if let Some(model) = &ctx.model_hint {
+        format!("model_hint={}", model)
+    } else {
+        format!("strategy={}", state.strategy.name())
+    };
+    info!(%route_label, "Routing chat completion");
 
     // Get routing decision
     let decision = state.strategy.route(&ctx, &state.pool).await;
 
-    match decision {
-        RoutingDecision::SingleToken { backend } => {
-            // Find the backend and proxy the request
-            let client = match state.pool.client(&backend) {
-                Some(c) => c,
-                None => {
-                    return Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({"error": {"message": format!("Backend '{}' not available", backend)}}).to_string(),
-                        ))
-                        .unwrap();
-                }
-            };
-
-            proxy_request(client, parsed, stream).await
-        }
+    let (backend, backend_label) = match &decision {
+        RoutingDecision::SingleToken { backend } => (backend.clone(), backend.clone()),
         RoutingDecision::Speculative { draft_backend: _, target_backend, n_draft: _ } => {
-            // Speculative decode: draft on draft_backend, verify on target_backend
-            // For MVP, just proxy to the target backend (full implementation in Phase 4)
-            warn!("Speculative decode strategy selected — proxying to target backend (full impl pending)");
-            let client = match state.pool.client(&target_backend) {
-                Some(c) => c,
-                None => {
-                    return Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .header("content-type", "application/json")
-                        .body(Body::from(
-                            serde_json::json!({"error": {"message": format!("Backend '{}' not available", target_backend)}}).to_string(),
-                        ))
-                        .unwrap();
-                }
-            };
-
-            proxy_request(client, parsed, stream).await
+            (target_backend.clone(), format!("spec-{}", target_backend))
         }
-    }
+    };
+
+    let client = match state.pool.client(&backend) {
+        Some(c) => c,
+        None => {
+            return Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"error": {"message": format!("Backend '{}' not available", backend)}}).to_string(),
+                ))
+                .unwrap();
+        }
+    };
+
+    info!(backend = %backend, strategy = %state.strategy.name(), "Routed request");
+    proxy_request(client, parsed, stream, &backend_label).await
 }
 
 /// Proxy a request to a backend, handling both streaming and non-streaming.
-async fn proxy_request(client: Arc<BackendClient>, body: serde_json::Value, stream: bool) -> Response {
+async fn proxy_request(client: Arc<BackendClient>, body: serde_json::Value, stream: bool, backend_label: &str) -> Response {
     // Remove routing-specific model names from the body
     // The backend will pick the appropriate model
 
@@ -267,6 +261,10 @@ async fn proxy_request(client: Arc<BackendClient>, body: serde_json::Value, stre
                     "cache-control",
                     "no-cache".parse().unwrap(),
                 );
+                resp.headers_mut().insert(
+                    "x-route-backend",
+                    HeaderValue::from_str(backend_label).unwrap(),
+                );
                 resp
             }
             Err(e) => {
@@ -285,6 +283,7 @@ async fn proxy_request(client: Arc<BackendClient>, body: serde_json::Value, stre
             Ok(result) => {
                 Response::builder()
                     .header("content-type", "application/json")
+                    .header("x-route-backend", backend_label)
                     .body(Body::from(serde_json::to_string(&result).unwrap()))
                     .unwrap()
             }
@@ -352,6 +351,105 @@ async fn completions(
                 ))
                 .unwrap()
         }
+    }
+}
+
+/// Parse OpenAI chat messages from the request body into our Message format.
+/// Handles both string content and content arrays.
+fn parse_openai_messages(parsed: &serde_json::Value) -> Vec<RouterMessage> {
+    let mut messages = Vec::new();
+
+    if let Some(arr) = parsed["messages"].as_array() {
+        for msg in arr {
+            let role = msg["role"].as_str().unwrap_or("user").to_string();
+            let content = extract_message_content(msg);
+            messages.push(RouterMessage { role, content });
+        }
+    }
+
+    messages
+}
+
+/// Extract text content from an OpenAI message (handles string or content array).
+fn extract_message_content(msg: &serde_json::Value) -> String {
+    match &msg["content"] {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(parts) => {
+            let mut text = String::new();
+            for part in parts {
+                if part["type"] == "text" {
+                    if let Some(t) = part["text"].as_str() {
+                        if !text.is_empty() {
+                            text.push(' ');
+                        }
+                        text.push_str(t);
+                    }
+                }
+            }
+            text
+        }
+        _ => String::new(),
+    }
+}
+
+/// Get the concatenated user message text for routing decisions.
+#[allow(dead_code)]
+fn get_user_text(messages: &[RouterMessage]) -> String {
+    messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.as_str())
+        .collect::<Vec<&str>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_simple_messages() {
+        let json = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Write a sorting function in Rust"}
+            ]
+        });
+        let msgs = parse_openai_messages(&json);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "You are helpful");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "Write a sorting function in Rust");
+    }
+
+    #[test]
+    fn test_parse_multimodal_content() {
+        let json = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "What is in this image?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+                ]}
+            ]
+        });
+        let msgs = parse_openai_messages(&json);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "What is in this image?");
+    }
+
+    #[test]
+    fn test_empty_messages() {
+        let json = serde_json::json!({"messages": []});
+        let msgs = parse_openai_messages(&json);
+        assert_eq!(msgs.len(), 0);
+    }
+
+    #[test]
+    fn test_no_messages_field() {
+        let json = serde_json::json!({"model": "test", "max_tokens": 100});
+        let msgs = parse_openai_messages(&json);
+        assert_eq!(msgs.len(), 0);
     }
 }
 

@@ -1,7 +1,7 @@
 [server]
 listen = "127.0.0.1:13306"
 log_level = "info"
-default_strategy = "passthrough"
+default_strategy = "content"
 
 [backends]
 
@@ -34,10 +34,12 @@ default_strategy = "passthrough"
 
   [strategies.content]
   type = "content_router"
-  fallback_large_backend = "gpu"
+  small_backend = "npu"
+  large_backend = "gpu"
   gpu_keywords = [
     "code", "explain", "analyze", "debug", "refactor",
     "implement", "function", "algorithm", "architecture",
-    "write", "fix", "review", "optimize", "design", "test"
+    "write", "fix", "review", "optimize", "design", "test",
+    "create", "build", "generate", "fix", "solve", "calculate"
   ]
   max_small_tokens = 2000

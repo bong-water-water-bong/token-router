@@ -101,7 +101,8 @@ pub enum StrategyConfig {
 
     #[serde(rename = "content_router")]
     ContentRouter {
-        fallback_large_backend: String,
+        small_backend: String,
+        large_backend: String,
         #[serde(default)]
         gpu_keywords: Vec<String>,
         #[serde(default = "default_max_small_tokens")]

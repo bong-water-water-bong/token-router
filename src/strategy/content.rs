@@ -22,7 +22,7 @@ pub struct ContentRouterStrategy {
     /// Keywords that trigger large backend routing.
     pub gpu_keywords: Vec<String>,
 
-    /// Max tokens before switching to large backend.
+    /// Max total tokens before switching to large backend permanently.
     pub max_small_tokens: usize,
 }
 
@@ -73,5 +73,76 @@ impl RouterStrategy for ContentRouterStrategy {
         RoutingDecision::SingleToken {
             backend: self.small_backend.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{Context, Message};
+    use std::collections::HashMap;
+
+    fn ctx_with_messages(texts: &[&str]) -> Context {
+        let messages: Vec<Message> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let role = if i == 0 { "system".into() } else { "user".into() };
+                Message {
+                    role,
+                    content: t.to_string(),
+                }
+            })
+            .collect();
+        Context {
+            session_id: "test".into(),
+            messages,
+            generated: vec![],
+            total_tokens: 0,
+            max_tokens: 512,
+            model_hint: None,
+            stream: false,
+        }
+    }
+
+    fn strategy() -> ContentRouterStrategy {
+        ContentRouterStrategy {
+            small_backend: "npu".into(),
+            large_backend: "gpu".into(),
+            gpu_keywords: vec![
+                "code".into(), "explain".into(), "debug".into(),
+                "refactor".into(), "write".into(), "fix".into(),
+            ],
+            max_small_tokens: 2000,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_greeting_routes_npu() {
+        let ctx = ctx_with_messages(&["You are helpful", "Hello!"]);
+        let d = strategy().route(&ctx, &BackendPool::from_config(HashMap::new())).await;
+        assert!(matches!(d, RoutingDecision::SingleToken { backend } if backend == "npu"));
+    }
+
+    #[tokio::test]
+    async fn test_code_routes_gpu() {
+        let ctx = ctx_with_messages(&["You are a coder", "Write a Rust sort function"]);
+        let d = strategy().route(&ctx, &BackendPool::from_config(HashMap::new())).await;
+        assert!(matches!(d, RoutingDecision::SingleToken { backend } if backend == "gpu"));
+    }
+
+    #[tokio::test]
+    async fn test_debug_routes_gpu() {
+        let ctx = ctx_with_messages(&["Assistant", "Help debug this Python crash on line 42"]);
+        let d = strategy().route(&ctx, &BackendPool::from_config(HashMap::new())).await;
+        assert!(matches!(d, RoutingDecision::SingleToken { backend } if backend == "gpu"));
+    }
+
+    #[tokio::test]
+    async fn test_long_context_routes_gpu() {
+        let long = "a".repeat(1000);
+        let ctx = ctx_with_messages(&["Assistant", &long]);
+        let d = strategy().route(&ctx, &BackendPool::from_config(HashMap::new())).await;
+        assert!(matches!(d, RoutingDecision::SingleToken { backend } if backend == "gpu"));
     }
 }

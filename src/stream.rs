@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 /// SSE event data from a backend stream.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SseEvent {
     pub data: String,
@@ -26,6 +27,7 @@ pub struct ProxyStream<S> {
 }
 
 impl<S> ProxyStream<S> {
+    #[allow(dead_code)]
     pub fn new(inner: S, backend_id: String) -> Self {
         Self { inner, backend_id }
     }
@@ -45,6 +47,7 @@ where
 
 /// Parse an SSE data chunk and extract the content delta (if any).
 /// Returns None for "[DONE]" or empty lines.
+#[allow(dead_code)]
 pub fn parse_sse_chunk(line: &str) -> Option<String> {
     let line = line.trim();
     if line.is_empty() || line == "data: [DONE]" {
@@ -58,6 +61,7 @@ pub fn parse_sse_chunk(line: &str) -> Option<String> {
 }
 
 /// Try to extract the token text from a chat completion chunk.
+#[allow(dead_code)]
 pub fn extract_delta(chunk: &str) -> Option<String> {
     use serde_json::Value;
     let parsed: Value = serde_json::from_str(chunk).ok()?;
@@ -70,6 +74,7 @@ pub fn extract_delta(chunk: &str) -> Option<String> {
 }
 
 /// Try to extract log-prob from a chunk.
+#[allow(dead_code)]
 pub fn extract_log_prob(chunk: &str) -> Option<f32> {
     use serde_json::Value;
     let parsed: Value = serde_json::from_str(chunk).ok()?;
@@ -77,6 +82,7 @@ pub fn extract_log_prob(chunk: &str) -> Option<f32> {
 }
 
 /// Build an SSE data string from a chat completion delta.
+#[allow(dead_code)]
 pub fn build_sse_chunk(delta: &str, finish_reason: Option<&str>) -> String {
     let finish = match finish_reason {
         Some(reason) => format!("\"finish_reason\":\"{}\"", reason),

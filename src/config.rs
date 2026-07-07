@@ -139,6 +139,7 @@ impl Config {
     }
 
     /// Load from a string (for testing).
+    #[allow(dead_code)]
     pub fn from_str(content: &str) -> anyhow::Result<Self> {
         toml::from_str(content)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))

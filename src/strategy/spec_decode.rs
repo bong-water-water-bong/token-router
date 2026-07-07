@@ -23,6 +23,7 @@ pub struct SpecDecodeStrategy {
     pub n_draft: usize,
 
     /// Minimum acceptance probability.
+    #[allow(dead_code)]
     pub acceptance_threshold: f64,
 }
 

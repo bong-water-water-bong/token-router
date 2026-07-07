@@ -27,6 +27,7 @@ pub struct CascadeStrategy {
 }
 
 /// The cascade can be in one of two states per-token
+#[allow(dead_code)]
 enum CascadeState {
     /// Using the small backend normally
     Small,

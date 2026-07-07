@@ -27,8 +27,10 @@ pub enum RoutingDecision {
 
     /// Speculative: draft N tokens from one backend, verify on another.
     Speculative {
+        #[allow(dead_code)]
         draft_backend: String,
         target_backend: String,
+        #[allow(dead_code)]
         n_draft: usize,
     },
 }

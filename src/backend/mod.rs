@@ -15,6 +15,7 @@ pub type BackendId = String;
 
 /// Capabilities a backend may advertise or support.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Capability {
     Streaming,
     ToolCalls,
@@ -30,6 +31,7 @@ pub struct BackendState {
     pub config: BackendConfig,
     pub healthy: bool,
     pub last_checked: Instant,
+    #[allow(dead_code)]
     pub latency_p50_ms: f64,
 }
 
@@ -69,6 +71,7 @@ impl BackendPool {
     }
 
     /// Get backend state.
+    #[allow(dead_code)]
     pub fn state(&self, id: &str) -> Option<BackendState> {
         self.backends.get(id).map(|s| s.clone())
     }

@@ -221,7 +221,7 @@ async fn chat_completion(
 
             proxy_request(client, parsed, stream).await
         }
-        RoutingDecision::Speculative { draft_backend, target_backend, n_draft } => {
+        RoutingDecision::Speculative { draft_backend: _, target_backend, n_draft: _ } => {
             // Speculative decode: draft on draft_backend, verify on target_backend
             // For MVP, just proxy to the target backend (full implementation in Phase 4)
             warn!("Speculative decode strategy selected — proxying to target backend (full impl pending)");

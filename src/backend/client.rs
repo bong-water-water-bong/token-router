@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 /// Streaming chunk from an SSE response.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StreamChunk {
     pub data: String,

@@ -29,3 +29,7 @@ pin-project = "1"
 bytes = "1"
 async-trait = "0.1"
 tokio-stream = "0.1"
+
+[[bin]]
+name = "npu-server"
+path = "src/bin/npu-server.rs"

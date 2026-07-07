@@ -1,0 +1,6 @@
+/target/
+*.o
+*.so
+*.lo
+*.a
+.DS_Store

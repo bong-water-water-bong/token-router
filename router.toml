@@ -43,3 +43,10 @@ default_strategy = "content"
     "create", "build", "generate", "fix", "solve", "calculate"
   ]
   max_small_tokens = 2000
+
+  [strategies.spec_decode]
+  type = "spec_decode"
+  draft_backend = "npu"
+  target_backend = "gpu"
+  n_draft = 4
+  acceptance_threshold = 0.8

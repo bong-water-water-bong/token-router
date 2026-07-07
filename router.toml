@@ -1,52 +1,14 @@
 [server]
 listen = "127.0.0.1:13306"
-log_level = "info"
-default_strategy = "cascade"
+default_strategy = "passthrough"
 
-[backends]
+[backends.flm]
+type = "openai"
+base_url = "http://127.0.0.1:52628"
+models = ["qwen3:0.6b"]
+speed_tok_s = 94
+max_concurrent = 4
 
-  [backends.npu]
-  type = "openai"
-  base_url = "http://127.0.0.1:52628"
-  models = ["qwen3:0.6b"]
-  speed_tok_s = 291
-  cost_per_token = 0.1
-
-  [backends.gpu]
-  type = "openai"
-  base_url = "http://127.0.0.1:13305"
-  models = ["Bonsai-1.7B-gguf"]
-  speed_tok_s = 113
-  cost_per_token = 1.0
-
-[strategies]
-
-  [strategies.passthrough]
-  type = "passthrough"
-  backend = "gpu"
-
-  [strategies.cascade]
-  type = "cascade"
-  small_backend = "npu"
-  large_backend = "gpu"
-  confidence_threshold = -2.5
-  min_context_for_large = 50
-
-  [strategies.content]
-  type = "content_router"
-  small_backend = "npu"
-  large_backend = "gpu"
-  gpu_keywords = [
-    "code", "explain", "analyze", "debug", "refactor",
-    "implement", "function", "algorithm", "architecture",
-    "write", "fix", "review", "optimize", "design", "test",
-    "create", "build", "generate", "fix", "solve", "calculate"
-  ]
-  max_small_tokens = 2000
-
-  [strategies.spec_decode]
-  type = "spec_decode"
-  draft_backend = "npu"
-  target_backend = "gpu"
-  n_draft = 4
-  acceptance_threshold = 0.8
+[strategies.passthrough]
+type = "passthrough"
+backend = "flm"

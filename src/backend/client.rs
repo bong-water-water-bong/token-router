@@ -124,9 +124,16 @@ impl BackendClient {
             .build()
             .expect("Failed to build reqwest client");
 
+        // Normalize: strip trailing /v1 if present (we append our own paths)
+        let base_url = base_url.trim_end_matches('/');
+        let base_url = base_url
+            .strip_suffix("/v1")
+            .unwrap_or(base_url)
+            .to_string();
+
         Self {
             client,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             api_key: api_key.map(String::from),
             circuit: Arc::new(CircuitBreaker::new(5, 30)),
             latency: Arc::new(LatencyTracker::new(50.0)),

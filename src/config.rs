@@ -111,6 +111,13 @@ pub enum StrategyConfig {
         #[serde(default = "default_max_small_tokens")]
         max_small_tokens: usize,
     },
+
+    #[serde(rename = "performance")]
+    Performance {
+        default_backend: String,
+        #[serde(default)]
+        force_backend: Option<String>,
+    },
 }
 
 fn default_confidence_threshold() -> f64 {

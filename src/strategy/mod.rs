@@ -6,11 +6,13 @@
 mod cascade;
 mod content;
 mod passthrough;
+mod performance;
 mod spec_decode;
 
 pub use cascade::CascadeStrategy;
 pub use content::ContentRouterStrategy;
 pub use passthrough::PassthroughStrategy;
+pub use performance::{PerformanceStrategy, PERFORMANCE_TABLE, ModelRoute};
 pub use spec_decode::SpecDecodeStrategy;
 
 use crate::backend::BackendPool;

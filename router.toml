@@ -1,6 +1,6 @@
 [server]
 listen = "127.0.0.1:13306"
-default_strategy = "content"
+default_strategy = "performance"
 
 [backends]
   [backends.npu]
@@ -9,33 +9,37 @@ default_strategy = "content"
   models = ["qwen3:0.6b", "qwen3:1.7b", "gemma3:1b"]
   speed_tok_s = 64
 
-  [backends.gpu]
+  [backends.gpu_vulkan]
   type = "openai"
   base_url = "http://127.0.0.1:13305"
-  models = ["qwen3-0.6b-FLM", "Bonsai-1.7B-gguf"]
-  speed_tok_s = 56
+  models = ["Bonsai-1.7B", "Qwen2-0.5B", "Hy-MT2-1.8B", "gemma-2-2b", "gemma3", "Nemo"]
+  speed_tok_s = 279
 
-  [backends.final]
-  type = "openai"
-  base_url = "http://127.0.0.1:52627"
-  models = ["qwen3:0.6b"]
-  speed_tok_s = 43
+  [backends.rocm]
+  type = "rocm"
+  base_url = "http://127.0.0.1:13307"
+  models = ["ZAYA1PREVIEW-74B-A4B-Q4_K_M", "zaya"]
+  speed_tok_s = 18
 
 [strategies]
+  [strategies.performance]
+  type = "performance"
+  default_backend = "gpu_vulkan"
+
   [strategies.passthrough]
   type = "passthrough"
   backend = "npu"
 
   [strategies.cascade]
   type = "cascade"
-  small_backend = "final"
-  large_backend = "gpu"
+  small_backend = "npu"
+  large_backend = "gpu_vulkan"
   confidence_threshold = -3.0
   min_context_for_large = 50
 
   [strategies.content]
   type = "content_router"
   small_backend = "npu"
-  large_backend = "gpu"
+  large_backend = "gpu_vulkan"
   gpu_keywords = ["code", "explain", "analyze", "debug", "refactor"]
   max_small_tokens = 2000

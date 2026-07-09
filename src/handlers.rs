@@ -8,7 +8,7 @@ use crate::config::{self, Config};
 use crate::context::{Context as RouterContext, Message as RouterMessage};
 use crate::strategy::{
     CascadeStrategy, ContentRouterStrategy, PassthroughStrategy,
-    RouterStrategy, RoutingDecision, SpecDecodeStrategy,
+    PerformanceStrategy, RouterStrategy, RoutingDecision, SpecDecodeStrategy,
 };
 use axum::{
     Router,
@@ -102,6 +102,15 @@ pub fn build_strategy(config: &Config) -> Box<dyn RouterStrategy> {
                     large_backend: large_backend.clone(),
                     gpu_keywords: gpu_keywords.clone(),
                     max_small_tokens: *max_small_tokens,
+                })
+            }
+            config::StrategyConfig::Performance {
+                default_backend,
+                force_backend,
+            } => {
+                Box::new(PerformanceStrategy {
+                    default_backend: default_backend.clone(),
+                    force_backend: force_backend.clone(),
                 })
             }
             config::StrategyConfig::SpecDecode {
@@ -263,6 +272,13 @@ pub fn validate_config(config: &Config) -> Vec<String> {
                 if !backend_ids.contains(&large_backend.as_str()) {
                     warnings.push(format!(
                         "ContentRouter '{}' references unknown large_backend '{}'", name, large_backend
+                    ));
+                }
+            }
+            config::StrategyConfig::Performance { default_backend, .. } => {
+                if !backend_ids.contains(&default_backend.as_str()) {
+                    warnings.push(format!(
+                        "Performance strategy '{}' references unknown default_backend '{}'", name, default_backend
                     ));
                 }
             }

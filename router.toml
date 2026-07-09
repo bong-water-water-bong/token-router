@@ -1,50 +1,41 @@
 [server]
 listen = "127.0.0.1:13306"
 default_strategy = "content"
-log_level = "info"
 
 [backends]
-
   [backends.npu]
   type = "openai"
   base_url = "http://127.0.0.1:52625"
   models = ["qwen3:0.6b", "qwen3:1.7b", "gemma3:1b"]
-  speed_tok_s = 291
-  cost_per_token = 0.1
-  max_concurrent = 4
+  speed_tok_s = 64
 
   [backends.gpu]
   type = "openai"
   base_url = "http://127.0.0.1:13305"
   models = ["qwen3-0.6b-FLM", "Bonsai-1.7B-gguf"]
-  speed_tok_s = 113
-  cost_per_token = 1.0
-  max_concurrent = 2
+  speed_tok_s = 56
 
-  [backends.ollama]
+  [backends.final]
   type = "openai"
-  base_url = "http://127.0.0.1:11434"
-  models = ["qwen3:0.6b", "llama3.1:8b", "qwen3.6:27b"]
-  speed_tok_s = 40
-  cost_per_token = 0.5
-  max_concurrent = 1
+  base_url = "http://127.0.0.1:52627"
+  models = ["qwen3:0.6b"]
+  speed_tok_s = 43
 
 [strategies]
-
   [strategies.passthrough]
   type = "passthrough"
   backend = "npu"
 
   [strategies.cascade]
   type = "cascade"
-  small_backend = "npu"
+  small_backend = "final"
   large_backend = "gpu"
-  confidence_threshold = -2.5
+  confidence_threshold = -3.0
   min_context_for_large = 50
 
   [strategies.content]
   type = "content_router"
   small_backend = "npu"
   large_backend = "gpu"
-  gpu_keywords = ["code", "explain", "analyze", "debug", "refactor", "implement", "function", "algorithm", "architecture"]
+  gpu_keywords = ["code", "explain", "analyze", "debug", "refactor"]
   max_small_tokens = 2000

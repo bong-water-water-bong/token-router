@@ -11,6 +11,7 @@
 //! ```
 
 use crate::backend::BackendClient;
+use crate::kv_cache;
 use crate::stream::{extract_delta, extract_log_prob, parse_sse_chunk};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -20,7 +21,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-/// Run a cascade streaming session.
+/// Run a cascade streaming session with optional KV cache handoff.
+///
+/// When `npu_backend_id` and `gpu_backend_id` are provided, the cascade
+/// will attempt a zero-copy KV cache handoff (dma-buf) instead of sending
+/// accumulated text. Falls back to text when KV cache is unavailable.
 ///
 /// Returns an infallible byte stream (`Result<Bytes, Infallible>`) suitable
 /// for `axum::body::Body::from_stream()`.
@@ -30,10 +35,25 @@ pub fn cascade_stream(
     body: Value,
     threshold: f64,
 ) -> impl futures::Stream<Item = Result<Bytes, Infallible>> {
+    cascade_stream_with_kv_cache(npu_client, gpu_client, None, None, body, threshold)
+}
+
+/// Run a cascade streaming session with KV cache handoff.
+///
+/// Uses dma-buf shared memory for zero-copy KV cache handoff between
+/// NPU and GPU backends. Falls back gracefully to text-based handoff.
+pub fn cascade_stream_with_kv_cache(
+    npu_client: Arc<BackendClient>,
+    gpu_client: Arc<BackendClient>,
+    npu_backend_id: Option<String>,
+    gpu_backend_id: Option<String>,
+    body: Value,
+    threshold: f64,
+) -> impl futures::Stream<Item = Result<Bytes, Infallible>> {
     let (tx, rx) = mpsc::channel::<Bytes>(128);
 
     tokio::spawn(async move {
-        if let Err(e) = run_cascade(npu_client, gpu_client, body, threshold, tx).await {
+        if let Err(e) = run_cascade(npu_client, gpu_client, npu_backend_id, gpu_backend_id, body, threshold, tx).await {
             warn!("Cascade stream error: {}", e);
         }
     });
@@ -45,6 +65,8 @@ pub fn cascade_stream(
 async fn run_cascade(
     npu_client: Arc<BackendClient>,
     gpu_client: Arc<BackendClient>,
+    npu_backend_id: Option<String>,
+    gpu_backend_id: Option<String>,
     mut body: Value,
     threshold: f64,
     tx: mpsc::Sender<Bytes>,
@@ -112,12 +134,41 @@ async fn run_cascade(
                             CONFIDENCE_WINDOW
                         );
 
-                        // Handoff to GPU with accumulated context
+                        // Construct the conversation so far
+                        let mut conversation: Vec<Value> = body["messages"].as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        if !accumulated.is_empty() {
+                            conversation.push(serde_json::json!({
+                                "role": "assistant",
+                                "content": accumulated.concat()
+                            }));
+                        }
+
+                        // Try KV cache handoff first (zero-copy, O(1))
+                        let mut kv_cache_success = false;
+                        if let (Some(npu_id), Some(gpu_id)) = (&npu_backend_id, &gpu_backend_id) {
+                            if let Ok(Some(_handle)) = kv_cache::handoff(
+                                npu_client.clone(),
+                                gpu_client.clone(),
+                                npu_id,
+                                gpu_id,
+                                &conversation,
+                            ).await {
+                                info!("KV cache handoff succeeded — starting GPU with shared cache");
+                                kv_cache_success = true;
+                            }
+                        }
+
+                        // Fall back to text-based handoff if KV cache unavailable
+                        if !kv_cache_success {
+                            info!("KV cache handoff unavailable, using text fallback");
+                        }
+
                         let gpu_resp = start_gpu(gpu_client.clone(), &body, &accumulated)
                             .await
                             .map_err(|e| format!("GPU handoff failed: {}", e))?;
 
-                        // Forward GPU stream to client, then exit
                         forward_gpu(gpu_resp, &tx, &accumulated).await;
                         return Ok(());
                     }

@@ -140,6 +140,11 @@ impl BackendClient {
         }
     }
 
+    /// Get the backend's base URL.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Check if the circuit breaker allows a request.
     #[allow(dead_code)]
     pub fn is_available(&self) -> bool {
@@ -222,6 +227,26 @@ impl BackendClient {
             }
             let resp = req.send().await.context("Chat completion request failed")?;
             let result: Value = resp.json().await.context("Failed to parse chat completion response")?;
+            Ok(result)
+        }).await
+    }
+
+    /// Make a POST request with JSON body to an arbitrary endpoint path.
+    /// The path should start with "/" and will be appended to base_url.
+    /// Useful for KV cache handoff endpoints: /v1/kv_cache/export, /v1/kv_cache/import.
+    pub async fn post_json(&self, path: &str, body: Value) -> Result<Value> {
+        self.request_with_circuit("post_json", async {
+            let url = format!("{}{}", self.base_url, path);
+            let mut req = self
+                .client
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(600));
+            if let Some(key) = &self.api_key {
+                req = req.header("Authorization", format!("Bearer {}", key));
+            }
+            let resp = req.send().await.context("POST request failed")?;
+            let result: Value = resp.json().await.context("Failed to parse response")?;
             Ok(result)
         }).await
     }

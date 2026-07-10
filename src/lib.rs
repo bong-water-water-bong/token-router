@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod handlers;
 pub mod strategy;
+pub mod kv_cache;
 pub mod stream;
 
 /// Version constant.

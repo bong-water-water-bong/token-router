@@ -124,6 +124,7 @@ pub fn build_strategy(config: &Config) -> Box<dyn RouterStrategy> {
                     target_backend: target_backend.clone(),
                     n_draft: *n_draft,
                     acceptance_threshold: *acceptance_threshold,
+                    dynamic_n_draft: true,
                 })
             }
         }
@@ -401,6 +402,62 @@ pub async fn chat_completion(
     // ── Cascade strategy (non-streaming) ─────────────────────────────
     if state.strategy.name() == "cascade" && !stream {
         return cascade_nonstreaming(state, parsed).await;
+    }
+
+    // ── Speculative Decode strategy (streaming) ──────────────────────
+    // Draft on fast backend (NPU), verify on capable backend (GPU).
+    // Tokens accepted using rejection sampling — all within one SSE stream.
+    if state.strategy.name() == "spec_decode" && stream {
+        let spec_cfg = match state.config.strategies.get("spec_decode") {
+            Some(config::StrategyConfig::SpecDecode {
+                draft_backend,
+                target_backend,
+                n_draft,
+                acceptance_threshold,
+            }) => (draft_backend.clone(), target_backend.clone(), *n_draft, *acceptance_threshold),
+            _ => {
+                let ids = state.pool.backend_ids();
+                let draft = ids.iter().find(|id| id.contains("npu")).cloned()
+                    .unwrap_or_else(|| ids.first().cloned().unwrap_or_default());
+                let target = ids.iter().find(|id| id.contains("gpu")).cloned()
+                    .unwrap_or_else(|| ids.last().cloned().unwrap_or_default());
+                (draft, target, 4usize, 0.8f64)
+            }
+        };
+
+        let (draft_id, target_id, n_draft, acceptance_threshold) = spec_cfg;
+
+        let draft_client = match state.pool.client(&draft_id) {
+            Some(c) => c,
+            None => return proxy_single(state, parsed, &target_id, stream).await,
+        };
+        let target_client = match state.pool.client(&target_id) {
+            Some(c) => c,
+            None => return proxy_single(state, parsed, &draft_id, stream).await,
+        };
+
+        info!(
+            draft = %draft_id, target = %target_id, n_draft = %n_draft,
+            "Speculative decode streaming"
+        );
+
+        let stream_body = crate::spec_decode::spec_decode_stream(
+            draft_client, target_client, parsed, n_draft, acceptance_threshold,
+        );
+        let mut resp = Response::new(Body::from_stream(stream_body));
+        resp.headers_mut().insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream"),
+        );
+        resp.headers_mut().insert(
+            "cache-control",
+            HeaderValue::from_static("no-cache"),
+        );
+        resp.headers_mut().insert(
+            "x-route-backend",
+            HeaderValue::from_static("spec_decode"),
+        );
+        return resp;
     }
 
     // ── Standard routing: single backend ─────────────────────────────

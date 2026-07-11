@@ -8,8 +8,9 @@ pub mod cascade;
 pub mod config;
 pub mod context;
 pub mod handlers;
-pub mod strategy;
 pub mod kv_cache;
+pub mod spec_decode;
+pub mod strategy;
 pub mod stream;
 
 /// Version constant.

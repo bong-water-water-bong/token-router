@@ -43,3 +43,10 @@ default_strategy = "performance"
   large_backend = "gpu_vulkan"
   gpu_keywords = ["code", "explain", "analyze", "debug", "refactor"]
   max_small_tokens = 2000
+
+  [strategies.spec_decode]
+  type = "spec_decode"
+  draft_backend = "npu"
+  target_backend = "gpu_vulkan"
+  n_draft = 4
+  acceptance_threshold = 0.8

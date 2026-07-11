@@ -1,6 +1,6 @@
 [server]
 listen = "127.0.0.1:13306"
-default_strategy = "performance"
+default_strategy = "spec_decode"
 
 [backends]
   [backends.npu]

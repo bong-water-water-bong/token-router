@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::sync::RwLock as StdRwLock;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -26,7 +27,7 @@ pub struct StreamChunk {
 #[derive(Debug)]
 struct CircuitBreaker {
     consecutive_failures: AtomicU64,
-    last_failure_time: RwLock<Option<Instant>>,
+    last_failure_time: StdRwLock<Option<Instant>>,
     is_open: AtomicBool,
     failure_threshold: u64,
     cooldown_secs: u64,
@@ -36,7 +37,7 @@ impl CircuitBreaker {
     fn new(failure_threshold: u64, cooldown_secs: u64) -> Self {
         Self {
             consecutive_failures: AtomicU64::new(0),
-            last_failure_time: RwLock::new(None),
+            last_failure_time: StdRwLock::new(None),
             is_open: AtomicBool::new(false),
             failure_threshold,
             cooldown_secs,
@@ -49,11 +50,13 @@ impl CircuitBreaker {
             return true;
         }
         // Circuit is open — check if cooldown has elapsed
-        if let Some(last) = *self.last_failure_time.blocking_read() {
-            if last.elapsed().as_secs() >= self.cooldown_secs {
-                // Half-open: allow one probe request
-                self.is_open.store(false, Ordering::Relaxed);
-                return true;
+        if let Ok(guard) = self.last_failure_time.read() {
+            if let Some(last) = *guard {
+                if last.elapsed().as_secs() >= self.cooldown_secs {
+                    // Half-open: allow one probe request
+                    self.is_open.store(false, Ordering::Relaxed);
+                    return true;
+                }
             }
         }
         false
@@ -68,7 +71,9 @@ impl CircuitBreaker {
     /// Record a failed request. Opens circuit if threshold exceeded.
     fn record_failure(&self) {
         let failures = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        *self.last_failure_time.blocking_write() = Some(Instant::now());
+        if let Ok(mut guard) = self.last_failure_time.write() {
+            *guard = Some(Instant::now());
+        }
         if failures >= self.failure_threshold {
             warn!(
                 "Circuit breaker OPEN after {} consecutive failures (cooldown: {}s)",

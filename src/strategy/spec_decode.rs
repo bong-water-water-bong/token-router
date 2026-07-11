@@ -57,17 +57,20 @@ impl RouterStrategy for SpecDecodeStrategy {
 
     async fn route(&self, ctx: &Context, pool: &BackendPool) -> RoutingDecision {
         // Check that both backends exist
-        let has_draft = pool.client(&self.draft_backend).is_some();
-        let has_target = pool.client(&self.target_backend).is_some();
+        // Check both backends are configured AND healthy
+        let draft_alive = pool.client(&self.draft_backend).is_some()
+            && pool.state(&self.draft_backend).map(|s| s.healthy).unwrap_or(false);
+        let target_alive = pool.client(&self.target_backend).is_some()
+            && pool.state(&self.target_backend).map(|s| s.healthy).unwrap_or(false);
 
-        if !has_draft || !has_target {
-            // Fall back to single backend if either is unavailable
-            let fallback: String = if has_target {
+        if !draft_alive || !target_alive {
+            // Fall back to a single healthy backend
+            let fallback: String = if target_alive {
                 self.target_backend.clone()
-            } else if has_draft {
+            } else if draft_alive {
                 self.draft_backend.clone()
             } else {
-                // No backends available — return first configured
+                // No healthy backends — try any configured backend
                 pool.backend_ids().first().cloned().unwrap_or_default()
             };
             return RoutingDecision::SingleToken { backend: fallback };

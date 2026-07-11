@@ -123,12 +123,13 @@ async fn run_spec_decode(
     let mut total_accepted = 0usize;
     let mut round_count = 0usize;
 
-    // We accumulate the conversation as we go — each round adds accepted tokens
-    // to the conversation context for the next draft.
-    let mut conversation: Vec<Value> = body["messages"]
+    // Original messages (reset each round so the draft model doesn't
+    // see its own output and loop).
+    let original_messages: Vec<Value> = body["messages"]
         .as_array()
         .cloned()
         .unwrap_or_default();
+    let mut conversation: Vec<Value> = original_messages.clone();
 
     // Track the total assistant response so far for the final response
     let mut assistant_response = String::new();
@@ -365,7 +366,7 @@ async fn run_spec_decode(
             }
         }
 
-        // Safety: don't loop forever
+        // Safety: don't loop forever  
         if round_count >= 512 {
             warn!("SpecDecode: hit max round limit (512), terminating");
             break;

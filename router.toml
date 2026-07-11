@@ -7,7 +7,7 @@ default_strategy = "spec_decode"
   type = "openai"
   base_url = "http://127.0.0.1:52625"
   models = ["qwen3:0.6b", "qwen3:1.7b", "gemma3:1b"]
-  speed_tok_s = 64
+  speed_tok_s = 70
 
   [backends.gpu_vulkan]
   type = "openai"

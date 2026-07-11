@@ -607,9 +607,16 @@ pub fn check_logprobs(response: &serde_json::Value, threshold: f64) -> bool {
 }
 
 /// Proxy a request to a backend, handling both streaming and non-streaming.
-pub async fn proxy_request(client: Arc<BackendClient>, body: serde_json::Value, stream: bool, backend_label: &str) -> Response {
-    // Remove routing-specific model names from the body
-    // The backend will pick the appropriate model
+/// Sanitizes the body for backend compatibility (strips router-specific model names).
+pub async fn proxy_request(client: Arc<BackendClient>, mut body: serde_json::Value, stream: bool, backend_label: &str) -> Response {
+    // Strip router-specific model names — backends like ZINC reject unknown models
+    if let Some(model_val) = body.get("model") {
+        if let Some(model_str) = model_val.as_str() {
+            if model_str.contains("spec_decode") || model_str.contains("cascade") || model_str.contains("passthrough") || model_str.contains("performance") {
+                body["model"] = serde_json::Value::Null;
+            }
+        }
+    }
 
     if stream {
         match client.chat_completion_stream(body).await {

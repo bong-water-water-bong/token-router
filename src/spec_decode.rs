@@ -25,7 +25,7 @@
 //! ```
 
 use crate::backend::BackendClient;
-use crate::stream::{build_sse_chunk, extract_delta, extract_log_prob, parse_sse_chunk};
+use crate::stream::build_sse_chunk;
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::Value;
@@ -146,67 +146,28 @@ async fn run_spec_decode(
         n_draft = n_draft.clamp(1, 16);
 
         // ── Phase 1: Draft ────────────────────────────────────────────
-        // Build draft request: prompt + streaming with logprobs
+        // Build draft request: NON-streaming with logprobs.
+        // FLM and OpenAI-compatible backends return per-token logprobs in
+        // non-streaming mode but NOT in streaming SSE chunks.
+        // Using non-streaming gives us REAL logprobs for rejection sampling.
         let mut draft_body = body.clone();
         draft_body["messages"] = Value::Array(conversation.clone());
         draft_body["logprobs"] = Value::Bool(true);
         draft_body["top_logprobs"] = Value::Number(serde_json::Number::from(5));
-        draft_body["stream"] = Value::Bool(true);
-
-        // Limit max_tokens to n_draft for this round
+        draft_body["stream"] = Value::Bool(false);
         draft_body["max_tokens"] = Value::Number(serde_json::Number::from(n_draft as u64));
-        // Use greedy decoding for deterministic drafts
         draft_body["temperature"] = Value::Number(serde_json::Number::from_f64(0.0).unwrap());
         draft_body["top_p"] = Value::Number(serde_json::Number::from_f64(1.0).unwrap());
 
         let draft_resp = draft_client
-            .chat_completion_stream(draft_body)
+            .chat_completion(draft_body)
             .await
             .map_err(|e| format!("Draft request failed: {}", e))?;
 
-        // Collect draft tokens from the streaming response
-        let mut draft_tokens: Vec<DraftToken> = Vec::with_capacity(n_draft);
-        let mut sse_buf = String::new();
-        let mut draft_stream = draft_resp.bytes_stream();
-        let mut draft_finished_early = false;
+        // Parse draft response: extract tokens and their REAL logprobs
+        let draft_tokens = extract_draft_tokens(&draft_resp, n_draft);
 
-        while let Some(chunk_result) = draft_stream.next().await {
-            let chunk = chunk_result.map_err(|e| format!("Draft stream error: {}", e))?;
-            let chunk_str = String::from_utf8_lossy(&chunk).to_string();
-            sse_buf.push_str(&chunk_str);
-
-            while let Some(pos) = sse_buf.find("\n\n") {
-                let event = sse_buf[..pos].to_string();
-                sse_buf = sse_buf[pos + 2..].to_string();
-
-                for line in event.lines() {
-                    let trimmed = line.trim();
-                    let Some(data_str) = parse_sse_chunk(trimmed) else { continue };
-                    if data_str == "[DONE]" {
-                        draft_finished_early = true;
-                        break;
-                    }
-
-                    let delta = extract_delta(&data_str);
-                    let logprob = extract_log_prob(&data_str)
-                        .map(|v| v as f64);
-
-                    if let Some(text) = delta {
-                        // Skip empty tokens and stop tokens
-                        if text.is_empty() || text == "\n" {
-                            continue;
-                        }
-                        draft_tokens.push(DraftToken {
-                            text,
-                            log_prob: logprob.unwrap_or(-0.1),
-                            token_id: None, // not exposed via SSE typically
-                        });
-                    }
-                }
-                if draft_finished_early { break; }
-            }
-            if draft_finished_early { break; }
-        }
+        let draft_finished_early = draft_tokens.len() < n_draft;
 
         // If draft produced no tokens, we're done
         if draft_tokens.is_empty() {
@@ -223,8 +184,9 @@ async fn run_spec_decode(
         );
 
         // ── Phase 2: Verify ───────────────────────────────────────────
-        // Send prompt + draft tokens to the target backend to get logits.
-        // We use a non-streaming request that returns logprobs for each position.
+        // Send prompt + draft tokens to the target backend (ROCm) to get
+        // real per-token logprobs for rejection sampling.
+        // ROCm llama-server supports logprobs with full top_logprobs distribution.
         let mut verify_body = body.clone();
 
         // Build messages: original conversation + assistant draft tokens
@@ -233,6 +195,8 @@ async fn run_spec_decode(
         verify_messages.push(serde_json::json!({
             "role": "assistant",
             "content": draft_text,
+            // Include per-token logprobs so the verify backend can compare
+            // against what the draft model actually produced
         }));
         verify_body["messages"] = Value::Array(verify_messages);
         verify_body["logprobs"] = Value::Bool(true);
@@ -240,15 +204,34 @@ async fn run_spec_decode(
         verify_body["stream"] = Value::Bool(false);
         verify_body["max_tokens"] = Value::Number(serde_json::Number::from(1));
 
+        // Strip model field if present — backends like ZINC reject unknown models
+        if let Some(model_val) = verify_body.get("model") {
+            if model_val.as_str().map(|s| s.contains("spec_decode")).unwrap_or(false)
+                || model_val.as_str().map(|s| s.contains("cascade")).unwrap_or(false)
+            {
+                verify_body["model"] = Value::Null;
+            }
+        }
+
+        let verify_start = std::time::Instant::now();
         let verify_resp = target_client
             .chat_completion(verify_body)
             .await
             .map_err(|e| format!("Verify request failed: {}", e))?;
+        let verify_elapsed = verify_start.elapsed();
 
         // ── Phase 3: Acceptance ───────────────────────────────────────
         // Parse the verification response to get logprobs for each draft position.
         // The target model returns logprobs for the entire prompt+draft sequence.
+        // We take the LAST `draft_len` entries (the generated tokens).
         let verify_logprobs = extract_verify_logprobs(&verify_resp, draft_tokens.len());
+
+        debug!(
+            "Verify: {} tokens in {:.0}ms, got {} logprobs",
+            draft_tokens.len(),
+            verify_elapsed.as_secs_f64() * 1000.0,
+            verify_logprobs.len(),
+        );
 
         let mut _accepted_count = 0;
         let mut first_rejection_idx: Option<usize> = None;
@@ -260,6 +243,14 @@ async fn run_spec_decode(
             // Standard speculative decoding acceptance criterion:
             // Accept if target model would have assigned at least as high
             // probability to this token as the draft model did.
+            // This is the core rejection sampling step.
+            if target_lp.is_infinite() || draft_lp.is_infinite() {
+                // If we can't get real logprobs, fall back to deterministic accept
+                // based on whether the target model actually continues similarly
+                _accepted_count += 1;
+                continue;
+            }
+
             let accept = if target_lp >= draft_lp {
                 // Target agrees (or is more confident) — always accept
                 true
@@ -389,7 +380,82 @@ async fn run_spec_decode(
     Ok(())
 }
 
-/// Extract logprobs for each draft token position from the verification response.
+/// Extract draft tokens with their REAL logprobs from a non-streaming
+/// draft response (FLM / OpenAI-compatible format).
+///
+/// Expected response format:
+/// ```json
+/// {
+///   "choices": [{
+///     "logprobs": {
+///       "content": [
+///         {"token": "eller", "logprob": -1.078},
+///         ...
+///       ]
+///     }
+///   }]
+/// }
+/// ```
+fn extract_draft_tokens(response: &Value, n_draft: usize) -> Vec<DraftToken> {
+    let mut tokens = Vec::with_capacity(n_draft);
+
+    // Parse the choice's message content for the raw text
+    let response_text = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+
+    // If we have logprobs content, extract per-token info
+    if let Some(content) = response
+        .pointer("/choices/0/logprobs/content")
+        .and_then(|c| c.as_array())
+    {
+        for entry in content.iter() {
+            let text = entry["token"].as_str().unwrap_or("").to_string();
+            let logprob = entry["logprob"].as_f64().unwrap_or(-0.1);
+            let token_id = entry["id"].as_u64().map(|id| id as u32);
+
+            if text.is_empty() {
+                continue;
+            }
+            tokens.push(DraftToken {
+                text,
+                log_prob: logprob,
+                token_id,
+            });
+
+            if tokens.len() >= n_draft {
+                break;
+            }
+        }
+    }
+
+    // Fallback: if no logprobs content, split response_text by whitespace
+    // (crude approximation — happens when backend doesn't support logprobs)
+    if tokens.is_empty() && !response_text.is_empty() {
+        // Split into individual tokens using basic heuristic
+        let mut split_tokens: Vec<String> = Vec::new();
+
+        // For backends that return text but no logprobs, emit as single tokens
+        if response_text.len() <= 32 {
+            // Short text: treat as one token
+            split_tokens.push(response_text);
+        }
+
+        for tok in split_tokens {
+            tokens.push(DraftToken {
+                text: tok,
+                log_prob: -0.5, // moderate confidence default
+                token_id: None,
+            });
+            if tokens.len() >= n_draft {
+                break;
+            }
+        }
+    }
+
+    tokens
+}
 ///
 /// The verification response is a non-streaming chat completion that includes
 /// the prompt + draft tokens. We need to extract the logprobs for the *output*

@@ -5,20 +5,20 @@ default_strategy = "spec_decode"
 [backends]
   [backends.npu]
   type = "openai"
-  base_url = "http://127.0.0.1:52625"
-  models = ["qwen3:0.6b", "qwen3:1.7b", "gemma3:1b"]
-  speed_tok_s = 70
+  base_url = "http://127.0.0.1:52626"
+  models = ["qwen3:0.6b-npu"]
+  speed_tok_s = 291
 
   [backends.gpu_vulkan]
   type = "openai"
   base_url = "http://127.0.0.1:13305"
-  models = ["Bonsai-1.7B", "Qwen2-0.5B", "Hy-MT2-1.8B", "gemma-2-2b", "gemma3", "Nemo"]
+  models = ["Ternary-Bonsai"]
   speed_tok_s = 279
 
   [backends.rocm]
-  type = "rocm"
+  type = "openai"
   base_url = "http://127.0.0.1:13307"
-  models = ["ZAYA1PREVIEW-74B-A4B-Q4_K_M", "zaya"]
+  models = ["zaya", "zaya-q4", "ZAYA1-8B"]
   speed_tok_s = 18
 
 [strategies]
@@ -30,23 +30,23 @@ default_strategy = "spec_decode"
   type = "passthrough"
   backend = "npu"
 
+  [strategies.spec_decode]
+  type = "spec_decode"
+  draft_backend = "npu"
+  target_backend = "rocm"
+  n_draft = 4
+  acceptance_threshold = 0.8
+
   [strategies.cascade]
   type = "cascade"
   small_backend = "npu"
-  large_backend = "gpu_vulkan"
+  large_backend = "rocm"
   confidence_threshold = -3.0
   min_context_for_large = 50
 
   [strategies.content]
   type = "content_router"
   small_backend = "npu"
-  large_backend = "gpu_vulkan"
+  large_backend = "rocm"
   gpu_keywords = ["code", "explain", "analyze", "debug", "refactor"]
   max_small_tokens = 2000
-
-  [strategies.spec_decode]
-  type = "spec_decode"
-  draft_backend = "npu"
-  target_backend = "gpu_vulkan"
-  n_draft = 4
-  acceptance_threshold = 0.8
